@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
+use time::format_description::well_known::Rfc3339;
 use tracing::{Event, Id, Subscriber};
 use tracing_core::metadata::Level;
 use tracing_core::span::Attributes;
@@ -12,7 +13,6 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::SpanRef;
 use tracing_subscriber::Layer;
-use time::format_description::well_known::Rfc3339;
 
 /// Keys for core fields of the Bunyan format (https://github.com/trentm/node-bunyan#core-fields)
 const BUNYAN_VERSION: &str = "v";
@@ -36,6 +36,33 @@ fn to_bunyan_level(level: &Level) -> u16 {
         log::Level::Debug => 20,
         log::Level::Trace => 10,
     }
+}
+
+fn serialize_fields_from_all_spans<S>(
+    ctx: &Context<'_, S>,
+    map_serializer: &mut impl SerializeMap<Error = serde_json::Error>,
+) -> Result<(), std::io::Error>
+where
+    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    if let Some(leaf_span) = ctx.lookup_current() {
+        for span in leaf_span.scope().from_root() {
+            let extensions = span.extensions();
+            let event_visitor = extensions
+                .get::<JsonStorage>()
+                .expect("Unable to find FormattedFields in extensions; this is a bug");
+
+            for (key, value) in event_visitor
+                .values()
+                .iter()
+                .filter(|(&key, _)| key != "message" && !BUNYAN_RESERVED_FIELDS.contains(&key))
+            {
+                map_serializer.serialize_entry(key, value)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// This layer is exclusively concerned with formatting information using the [Bunyan format](https://github.com/trentm/node-bunyan).
@@ -74,7 +101,11 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
         Self::with_default_fields(name, make_writer, HashMap::new())
     }
 
-    pub fn with_default_fields(name: String, make_writer: W, default_fields: HashMap<String, Value>) -> Self {
+    pub fn with_default_fields(
+        name: String,
+        make_writer: W,
+        default_fields: HashMap<String, Value>,
+    ) -> Self {
         Self {
             make_writer,
             name,
@@ -107,6 +138,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
     fn serialize_span<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>(
         &self,
         span: &SpanRef<S>,
+        ctx: &Context<'_, S>,
         ty: Type,
     ) -> Result<Vec<u8>, std::io::Error> {
         let mut buffer = Vec::new();
@@ -127,9 +159,9 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
                 map_serializer.serialize_entry(key, value)?;
             } else {
                 tracing::debug!(
-                        "{} is a reserved field in the bunyan log format. Skipping it.",
-                        key
-                    );
+                    "{} is a reserved field in the bunyan log format. Skipping it.",
+                    key
+                );
             }
         }
 
@@ -146,6 +178,9 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
                 }
             }
         }
+
+        serialize_fields_from_all_spans(ctx, &mut map_serializer)?;
+
         map_serializer.end()?;
         Ok(buffer)
     }
@@ -257,10 +292,9 @@ where
             map_serializer.serialize_entry("file", &event.metadata().file())?;
 
             // Add all default fields
-            for (key, value) in self.default_fields
-                .iter()
-                .filter(|(key, _)| key.as_str() != "message" && !BUNYAN_RESERVED_FIELDS.contains(&key.as_str()))
-            {
+            for (key, value) in self.default_fields.iter().filter(|(key, _)| {
+                key.as_str() != "message" && !BUNYAN_RESERVED_FIELDS.contains(&key.as_str())
+            }) {
                 map_serializer.serialize_entry(key, value)?;
             }
 
@@ -289,6 +323,9 @@ where
                     }
                 }
             }
+
+            serialize_fields_from_all_spans(&ctx, &mut map_serializer)?;
+
             map_serializer.end()?;
             Ok(buffer)
         };
@@ -301,14 +338,14 @@ where
 
     fn on_new_span(&self, _attrs: &Attributes, id: &Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("Span not found, this is a bug");
-        if let Ok(serialized) = self.serialize_span(&span, Type::EnterSpan) {
+        if let Ok(serialized) = self.serialize_span(&span, &ctx, Type::EnterSpan) {
             let _ = self.emit(serialized);
         }
     }
 
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         let span = ctx.span(&id).expect("Span not found, this is a bug");
-        if let Ok(serialized) = self.serialize_span(&span, Type::ExitSpan) {
+        if let Ok(serialized) = self.serialize_span(&span, &ctx, Type::ExitSpan) {
             let _ = self.emit(serialized);
         }
     }
