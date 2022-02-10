@@ -75,6 +75,7 @@ pub struct BunyanFormattingLayer<W: for<'a> MakeWriter<'a> + 'static> {
     bunyan_version: u8,
     name: String,
     default_fields: HashMap<String, Value>,
+    level_as_number: bool,
 }
 
 impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
@@ -97,13 +98,14 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
     ///
     /// let formatting_layer = BunyanFormattingLayer::new("tracing_example".into(), || std::io::stdout());
     /// ```
-    pub fn new(name: String, make_writer: W) -> Self {
-        Self::with_default_fields(name, make_writer, HashMap::new())
+    pub fn new(name: String, make_writer: W, level_as_number: bool) -> Self {
+        Self::with_default_fields(name, make_writer, level_as_number, HashMap::new())
     }
 
     pub fn with_default_fields(
         name: String,
         make_writer: W,
+        level_as_number: bool,
         default_fields: HashMap<String, Value>,
     ) -> Self {
         Self {
@@ -113,6 +115,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
             hostname: gethostname::gethostname().to_string_lossy().into_owned(),
             bunyan_version: 0,
             default_fields,
+            level_as_number,
         }
     }
 
@@ -125,7 +128,11 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
         map_serializer.serialize_entry(BUNYAN_VERSION, &self.bunyan_version)?;
         map_serializer.serialize_entry(NAME, &self.name)?;
         map_serializer.serialize_entry(MESSAGE, &message)?;
-        map_serializer.serialize_entry(LEVEL, &to_bunyan_level(level))?;
+        if self.level_as_number {
+            map_serializer.serialize_entry(LEVEL, &to_bunyan_level(level))?;
+        } else {
+            map_serializer.serialize_entry(LEVEL, level.as_str())?;
+        }
         map_serializer.serialize_entry(HOSTNAME, &self.hostname)?;
         map_serializer.serialize_entry(PID, &self.pid)?;
         if let Ok(time) = &time::OffsetDateTime::now_utc().format(&Rfc3339) {
