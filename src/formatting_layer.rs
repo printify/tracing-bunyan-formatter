@@ -207,7 +207,10 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
         let msg = format_span_context(span, ty);
         self.serialize_bunyan_core_fields(&mut map_serializer, &msg, span.metadata().level())?;
         self.serialize_src(&mut map_serializer, &span.metadata())?;
-        self.serialize_fields_from_all_spans(&mut map_serializer, None, ctx)?;
+
+        let extensions = span.extensions();
+        let event_visitor = extensions.get::<JsonStorage>();
+        self.serialize_fields_from_all_spans(&mut map_serializer, event_visitor, ctx)?;
 
         map_serializer.end()?;
         Ok(buffer)
