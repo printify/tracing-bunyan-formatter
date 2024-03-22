@@ -8,7 +8,6 @@ use time::format_description::well_known::Rfc3339;
 use tracing::{Event, Id, Metadata, Subscriber};
 use tracing_core::metadata::Level;
 use tracing_core::span::Attributes;
-use tracing_log::AsLog;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::SpanRef;
@@ -34,17 +33,6 @@ const LOG_MODULE_PATH: &str = "log.module_path";
 
 const LOG_INTEROP_RESERVED_FIELDS: [&str; 4] = [LOG_TARGET, LOG_FILE, LOG_LINE, LOG_MODULE_PATH];
 
-/// Convert from log levels to Bunyan's levels.
-fn to_bunyan_level(level: &Level) -> u16 {
-    match level.as_log() {
-        log::Level::Error => 50,
-        log::Level::Warn => 40,
-        log::Level::Info => 30,
-        log::Level::Debug => 20,
-        log::Level::Trace => 10,
-    }
-}
-
 /// This layer is exclusively concerned with formatting information using the [Bunyan format](https://github.com/trentm/node-bunyan).
 /// It relies on the upstream `JsonStorageLayer` to get access to the fields attached to
 /// each span.
@@ -53,7 +41,6 @@ pub struct BunyanFormattingLayer<W: for<'a> MakeWriter<'a> + 'static> {
     hostname: String,
     name: String,
     default_fields: HashMap<String, Value>,
-    level_as_number: bool,
 }
 
 impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
@@ -76,14 +63,13 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
     ///
     /// let formatting_layer = BunyanFormattingLayer::new("tracing_example".into(), || std::io::stdout());
     /// ```
-    pub fn new(name: String, make_writer: W, level_as_number: bool) -> Self {
-        Self::with_default_fields(name, make_writer, level_as_number, HashMap::new())
+    pub fn new(name: String, make_writer: W) -> Self {
+        Self::with_default_fields(name, make_writer, HashMap::new())
     }
 
     pub fn with_default_fields(
         name: String,
         make_writer: W,
-        level_as_number: bool,
         default_fields: HashMap<String, Value>,
     ) -> Self {
         Self {
@@ -91,7 +77,6 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
             name,
             hostname: gethostname::gethostname().to_string_lossy().into_owned(),
             default_fields,
-            level_as_number,
         }
     }
 
@@ -103,11 +88,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
     ) -> Result<(), std::io::Error> {
         map_serializer.serialize_entry(NAME, &self.name)?;
         map_serializer.serialize_entry(MESSAGE, &message)?;
-        if self.level_as_number {
-            map_serializer.serialize_entry(LEVEL, &to_bunyan_level(level))?;
-        } else {
-            map_serializer.serialize_entry(LEVEL, level.as_str())?;
-        }
+        map_serializer.serialize_entry(LEVEL, level.as_str())?;
         map_serializer.serialize_entry(HOSTNAME, &self.hostname)?;
         if let Ok(time) = &time::OffsetDateTime::now_utc().format(&Rfc3339) {
             map_serializer.serialize_entry(TIME, time)?;
@@ -159,7 +140,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
                 .iter()
                 .filter(|(&key, _)| key != "message" && !BUNYAN_RESERVED_FIELDS.contains(&key))
             {
-                if LOG_INTEROP_RESERVED_FIELDS.contains(&key) {
+                if LOG_INTEROP_RESERVED_FIELDS.contains(key) {
                     map_serializer.serialize_entry(&key[4..], value)?;
                 } else {
                     map_serializer.serialize_entry(key, value)?;
@@ -200,7 +181,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static> BunyanFormattingLayer<W> {
         let mut map_serializer = serializer.serialize_map(None)?;
         let msg = format_span_context(span, ty);
         self.serialize_bunyan_core_fields(&mut map_serializer, &msg, span.metadata().level())?;
-        self.serialize_src(&mut map_serializer, &span.metadata())?;
+        self.serialize_src(&mut map_serializer, span.metadata())?;
 
         let extensions = span.extensions();
         let event_visitor = extensions.get::<JsonStorage>();
@@ -267,11 +248,10 @@ fn format_event_message<S: Subscriber + for<'a> tracing_subscriber::registry::Lo
     let mut message = event_visitor
         .values()
         .get("message")
-        .map(|v| match v {
+        .and_then(|v| match v {
             Value::String(s) => Some(s.as_str()),
             _ => None,
         })
-        .flatten()
         .unwrap_or_else(|| event.metadata().target())
         .to_owned();
 
@@ -305,7 +285,7 @@ where
 
             let msg = format_event_message(&current_span, event, &event_visitor);
             self.serialize_bunyan_core_fields(&mut map_serializer, &msg, event.metadata().level())?;
-            self.serialize_src(&mut map_serializer, &event.metadata())?;
+            self.serialize_src(&mut map_serializer, event.metadata())?;
             self.serialize_fields(&mut map_serializer, Some(&event_visitor), &ctx)?;
 
             map_serializer.end()?;
